@@ -1,0 +1,24 @@
+services:
+  app:
+    image: php:8.3-alpine
+    container_name: x-ui-api-mini
+    #ports:
+    #  - "11223:8000"
+    volumes:
+      - .:/app
+      - /etc/x-ui:/etc/x-ui:ro
+    working_dir: /app
+    command: php -S 0.0.0.0:8000
+    restart: always
+  nginx:
+    image: nginx:alpine
+    container_name: vpn_nginx_ssl
+    ports:
+      - "11223:11223"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - /etc/ssl/certs/node-selfsigned.crt:/etc/nginx/ssl/node.crt:ro
+      - /etc/ssl/private/node-selfsigned.key:/etc/nginx/ssl/node.key:ro
+    depends_on:
+      - app
+    restart: always
