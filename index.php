@@ -14,6 +14,15 @@ if (!$savedKey || $userToken !== $savedKey) {
 
 $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 
+if ($uri === '/ping') {
+    echo json_encode([
+        "status" => "ok",
+        "message" => "Connection established and authenticated",
+        "server_time" => date('Y-m-d H:i:s')
+    ]);
+    exit;
+}
+
 try {
     $db = new PDO("sqlite:$dbPath", null, null, [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
