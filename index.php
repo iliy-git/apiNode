@@ -31,29 +31,68 @@ try {
 
     if ($uri === '/email') {
         $email = $_GET['email'] ?? null;
-
+    
         if (!$email) {
             http_response_code(400);
             exit(json_encode(["error" => "Email parameter is required"]));
         }
-
-        $stmt = $db->prepare("SELECT up, down, total, expiry_time, enable FROM client_traffics WHERE email = ? LIMIT 1");
-        $stmt->execute([$email]);
-        $stats = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if ($stats) {
-            echo json_encode([
-                "email"       => $email,
-                "up"          => (int)$stats['up'],
-                "down"        => (int)$stats['down'],
-                "total"       => (int)$stats['total'],
-                "expiry_time" => (int)$stats['expiry_time'],
-                "is_active"   => (bool)$stats['enable']
-            ]);
-        } else {
+    
+        $stmtTraffic = $db->prepare("SELECT up, down, total, expiry_time, enable FROM client_traffics WHERE email = ? LIMIT 1");
+        $stmtTraffic->execute([$email]);
+        $stats = $stmtTraffic->fetch(PDO::FETCH_ASSOC);
+    
+        if (!$stats) {
             http_response_code(404);
-            echo json_encode(["error" => "User not found"]);
+            exit(json_encode(["error" => "User not found in traffic stats"]));
         }
+    
+        $stmtInbounds = $db->prepare("SELECT port, remark, settings, stream_settings FROM inbounds WHERE protocol = 'vless'");
+        $stmtInbounds->execute();
+        $inbounds = $stmtInbounds->fetchAll(PDO::FETCH_ASSOC);
+    
+        $generatedLink = null;
+        $host = explode(':', $_SERVER['HTTP_HOST'] ?? '127.0.0.1')[0];
+    
+        foreach ($inbounds as $row) {
+            $settings = json_decode($row['settings'], true);
+            
+            if (!isset($settings['clients']) || !is_array($settings['clients'])) {
+                continue;
+            }
+    
+            foreach ($settings['clients'] as $client) {
+                if (($client['email'] ?? '') === $email) {
+                    
+                    $stream = json_decode($row['stream_settings'], true);
+                    $reality = $stream['realitySettings'] ?? [];
+    
+                    $params = http_build_query([
+                        'type'     => $stream['network'] ?? 'tcp',
+                        'security' => $stream['security'] ?? 'reality',
+                        'pbk'      => $reality['settings']['publicKey'] ?? '',
+                        'fp'       => $reality['settings']['fingerprint'] ?? 'chrome',
+                        'sni'      => $reality['serverNames'][0] ?? '',
+                        'sid'      => $reality['shortIds'][0] ?? '',
+                        'spx'      => $reality['settings']['spiderX'] ?? '/',
+                        'flow'     => $client['flow'] ?? ''
+                    ]);
+    
+                    $generatedLink = "vless://{$client['id']}@{$host}:{$row['port']}?{$params}#" . urlencode($row['remark'] . "-" . $email);
+                    break 2;
+                }
+            }
+        }
+    
+        echo json_encode([
+            "email"       => $email,
+            "up"          => (int)$stats['up'],
+            "down"        => (int)$stats['down'],
+            "total"       => (int)$stats['total'],
+            "expiry_time" => (int)$stats['expiry_time'],
+            "is_active"   => (bool)$stats['enable'],
+            "link"        => $generatedLink
+        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        
         exit;
     }
 
