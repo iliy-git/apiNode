@@ -1,4 +1,3 @@
-iliy@vdska:~/apiNode$ cat index.php
 <?php
 header('Content-Type: application/json');
 
@@ -243,4 +242,3 @@ try {
         "details" => $e->getMessage()
     ]);
 }
-iliy@vdska:~/apiNode$
