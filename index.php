@@ -1,3 +1,4 @@
+iliy@vdska:~/apiNode$ cat index.php
 <?php
 header('Content-Type: application/json');
 
@@ -26,10 +27,76 @@ if ($uri === '/ping') {
 try {
     $db = new PDO("sqlite:$dbPath", null, null, [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::SQLITE_ATTR_OPEN_FLAGS => PDO::SQLITE_OPEN_READONLY
+        // Добавляем таймаут ожидания, чтобы избежать ошибки "database is locked"
+        PDO::ATTR_TIMEOUT => 5
     ]);
 
+    if ($uri === '/email/extend' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $input = json_decode(file_get_contents('php://input'), true);
+        $email = $input['email'] ?? null;
+        $days = (int)($input['days'] ?? 30); // По умолчанию 30 дней
+        
+        // Получаем текущую дату окончания из БД, чтобы продлевать ОТ НЕЕ, а не от сегодня
+        // Если у пользователя нет записей, берем текущее время
+        $stmtCurrent = $db->prepare("SELECT MAX(expiry_time) as last_expiry FROM client_traffics WHERE email = ?");
+        $stmtCurrent->execute([$email]);
+        $res = $stmtCurrent->fetch(PDO::FETCH_ASSOC);
+        
+        $currentExpiry = (int)$res['last_expiry'];
+        $nowMs = (int)(microtime(true) * 1000);
+        
+        // Если дата в прошлом или 0, продлеваем от сейчас. Если в будущем - прибавляем дни.
+        $baseTime = ($currentExpiry > $nowMs) ? $currentExpiry : $nowMs;
+        $newExpiry = $baseTime + ($days * 86400 * 1000);
+
+        error_log("DEBUG [extend]: Request: {$email}, Days: {$days}, New Expiry: {$newExpiry}");
+
+        if (!$email) {
+            http_response_code(400);
+            exit(json_encode(["error" => "Email is required"]));
+        }
+
+        // 1. Обновляем статистику
+        error_log("DEBUG [extend]: Executing UPDATE client_traffics...");
+        $stmtTraffic = $db->prepare("UPDATE client_traffics SET expiry_time = ?, enable = 1 WHERE email = ?");
+        $stmtTraffic->execute([$newExpiry, $email]);
+        
+        // 1.5 Обновляем таблицу clients
+        try {
+            $stmtClients = $db->prepare("UPDATE clients SET expiry_time = ?, enable = 1 WHERE email = ?");
+            $stmtClients->execute([$newExpiry, $email]);
+        } catch (PDOException $e) {
+            error_log("DEBUG [extend]: clients table not found.");
+        }
+
+        // 2. Обновляем JSON-настройки в inbounds
+        error_log("DEBUG [extend]: Updating inbounds...");
+        $stmtInbounds = $db->query("SELECT id, settings FROM inbounds");
+        $inbounds = $stmtInbounds->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($inbounds as $inbound) {
+            $settings = json_decode($inbound['settings'], true);
+            if (isset($settings['clients']) && is_array($settings['clients'])) {
+                $changed = false;
+                foreach ($settings['clients'] as &$client) {
+                    if (($client['email'] ?? '') === $email) {
+                        $client['expiryTime'] = $newExpiry;
+                        $changed = true;
+                    }
+                }
+                if ($changed) {
+                    $updateInbound = $db->prepare("UPDATE inbounds SET settings = ? WHERE id = ?");
+                    $updateInbound->execute([json_encode($settings, JSON_UNESCAPED_UNICODE), $inbound['id']]);
+                }
+            }
+        }
+
+        echo json_encode(["status" => "success", "message" => "Extended by {$days} days", "new_expiry" => $newExpiry]);
+        exit;
+    }
+
     if ($uri === '/email') {
+        // ... (твой рабочий код для GET /email остается без изменений) ...
         $email = $_GET['email'] ?? null;
 
         if (!$email) {
@@ -86,7 +153,6 @@ try {
                     }
 
                     $params = http_build_query($paramsArray);
-
                     $generatedLink = "vless://{$client['id']}@{$host}:{$row['port']}?{$params}#" . urlencode($row['remark'] . "-" . $email);
                     break 2;
                 }
@@ -107,6 +173,7 @@ try {
     }
 
     if ($uri === '/' || $uri === '') {
+        // ... (твой рабочий код для GET / остается без изменений) ...
         $host = explode(':', $_SERVER['HTTP_HOST'] ?? '127.0.0.1')[0];
         $query = "
             SELECT i.port, i.remark, i.protocol, i.settings, i.stream_settings,
@@ -166,6 +233,14 @@ try {
     echo json_encode(["error" => "Route not found"]);
 
 } catch (Exception $e) {
+    // Пишем саму ошибку в лог докера
+    error_log("CRITICAL ERROR: " . $e->getMessage());
+
     http_response_code(500);
-    echo json_encode(["error" => $e->getMessage()]);
+    // Возвращаем текст ошибки в ответе, чтобы ты видел её на стороне Laravel
+    echo json_encode([
+        "error" => "Internal Server Error",
+        "details" => $e->getMessage()
+    ]);
 }
+iliy@vdska:~/apiNode$
