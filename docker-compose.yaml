@@ -6,7 +6,7 @@ services:
     #  - "11223:8000"
     volumes:
       - .:/app
-      - /etc/x-ui:/etc/x-ui:ro
+      - /etc/x-ui:/etc/x-ui:rw
     working_dir: /app
     command: php -S 0.0.0.0:8000
     restart: always
