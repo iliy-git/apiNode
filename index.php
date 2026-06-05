@@ -153,36 +153,51 @@ try {
                 $remarkStr = !empty($row['remark']) ? $row['remark']."-".$clientEmail : $clientEmail;
                 
                 if ($protocol === 'vless') {
-                    $reality = $stream['realitySettings'] ?? [];
-                    $networkType = $stream['network'] ?? 'tcp';
-                    
-                    $paramsArray = [
-                        'type' => $networkType,
-                        'security' => $stream['security'] ?? 'reality',
-                        'pbk' => $reality['settings']['publicKey'] ?? '',
-                        'fp' => $reality['settings']['fingerprint'] ?? 'chrome',
-                        'sni' => $reality['serverNames'][0] ?? '',
-                        'sid' => $reality['shortIds'][0] ?? '',
-                        'spx' => $reality['settings']['spiderX'] ?? '/',
-                        'flow' => $client['flow'] ?? ''
-                    ];
-                    
-                    if ($networkType === 'grpc' && !empty($stream['grpcSettings'])) {
-                        $paramsArray['serviceName'] = $stream['grpcSettings']['serviceName'] ?? '';
-                        if (!empty($stream['grpcSettings']['mode'])) {
-                            $paramsArray['mode'] = $stream['grpcSettings']['mode'];
-                        }
-                    }
-                    
-                    // Убираем пустые параметры
-                    $paramsArray = array_filter($paramsArray, function($value) {
-                        return $value !== '' && $value !== null;
-                    });
-                    
-                    $params = http_build_query($paramsArray);
-                    $generatedLink = "vless://{$client['id']}@{$host}:{$row['port']}?" . $params . "#" . urlencode($remarkStr);
-                    
-                } elseif ($protocol === 'hysteria2' || $protocol === 'hysteria') {
+    $reality = $stream['realitySettings'] ?? [];
+    $networkType = $stream['network'] ?? 'tcp';
+    
+    $paramsArray = [
+        'type' => $networkType,
+        'security' => $stream['security'] ?? 'reality',
+        'pbk' => $reality['settings']['publicKey'] ?? '',
+        'fp' => $reality['settings']['fingerprint'] ?? 'chrome',
+        'sni' => $reality['serverNames'][0] ?? '',
+        'sid' => $reality['shortIds'][0] ?? '',
+        'spx' => $reality['settings']['spiderX'] ?? '/',
+        'flow' => $client['flow'] ?? ''
+    ];
+    
+    // Для gRPC добавляем специальные параметры
+    if ($networkType === 'grpc' && !empty($stream['grpcSettings'])) {
+        $grpcSettings = $stream['grpcSettings'];
+        $paramsArray['serviceName'] = $grpcSettings['serviceName'] ?? '';
+        
+        // Добавляем mode если есть
+        if (!empty($grpcSettings['mode'])) {
+            $paramsArray['mode'] = $grpcSettings['mode'];
+        }
+        
+        // Добавляем authority (если есть в grpcSettings или берем из sni)
+        if (!empty($grpcSettings['authority'])) {
+            $paramsArray['authority'] = $grpcSettings['authority'];
+        } elseif (!empty($reality['serverNames'][0])) {
+            $paramsArray['authority'] = $reality['serverNames'][0];
+        }
+        
+        // Добавляем encryption если нужно (обычно 'none' для reality)
+        if ($stream['security'] === 'reality') {
+            $paramsArray['encryption'] = 'none';
+        }
+    }
+    
+    // Убираем пустые параметры
+    $paramsArray = array_filter($paramsArray, function($value) {
+        return $value !== '' && $value !== null;
+    });
+    
+    $params = http_build_query($paramsArray);
+    $generatedLink = "vless://{$client['id']}@{$host}:{$row['port']}?" . $params . "#" . urlencode($remarkStr);
+} elseif ($protocol === 'hysteria2' || $protocol === 'hysteria') {
                     $password = $client['auth'] ?? $client['password'] ?? $client['id'] ?? '';
                     $hyParams = [];
                     $tls = $stream['tlsSettings'] ?? [];
