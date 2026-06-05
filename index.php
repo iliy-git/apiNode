@@ -90,49 +90,72 @@ try {
                 http_response_code(400);
                 exit(json_encode(["error" => "Email parameter is required"]));
             }
-            $stmtTraffic = $db->prepare("SELECT up, down, total, expiry_time, enable FROM client_traffics WHERE email = ? LIMIT 1");
-            $stmtTraffic->execute([$email]);
-            $stats = $stmtTraffic->fetch(PDO::FETCH_ASSOC);
-
-            if (!$stats) {
-                http_response_code(404);
-                exit(json_encode(["error" => "User not found in traffic stats"]));
-            }
-            $queryCondition = "WHERE i.protocol IN ('vless', 'hysteria2', 'hysteria')";
-        } else {
-            $queryCondition = "WHERE i.protocol IN ('vless', 'hysteria2', 'hysteria')";
         }
-
+        
         $host = explode(':', $_SERVER['HTTP_HOST'] ?? '127.0.0.1')[0];
         
+        // Получаем все инбаунды с нужными протоколами
         $query = "
-            SELECT i.port, i.remark, i.protocol, i.settings, i.stream_settings,
-                   t.email, t.up, t.down, t.total, t.expiry_time, t.enable
-            FROM inbounds i
-            JOIN client_traffics t ON i.id = t.inbound_id
-            $queryCondition
+            SELECT id, port, remark, protocol, settings, stream_settings
+            FROM inbounds
+            WHERE protocol IN ('vless', 'hysteria2', 'hysteria')
         ";
-
+        
         $results = [];
-        foreach ($db->query($query) as $row) {
-            if ($isSingleEmail && $row['email'] !== $email) continue;
-
-            $protocol = strtolower($row['protocol']);
+        $stmt = $db->query($query);
+        
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
             $settings = json_decode($row['settings'], true) ?? [];
             $stream = json_decode($row['stream_settings'], true) ?? [];
-
-            if (!isset($settings['clients']) || !is_array($settings['clients'])) continue;
-
+            
+            if (!isset($settings['clients']) || !is_array($settings['clients'])) {
+                continue;
+            }
+            
+            // Для каждого клиента в инбаунде
             foreach ($settings['clients'] as $client) {
-                if ($client['email'] !== $row['email']) continue;
-
+                $clientEmail = $client['email'] ?? '';
+                
+                // Пропускаем если нет email
+                if (empty($clientEmail)) {
+                    continue;
+                }
+                
+                // Фильтр по email если нужно
+                if ($isSingleEmail && $clientEmail !== $email) {
+                    continue;
+                }
+                
+                // Пытаемся получить трафик из client_traffics
+                $trafficStmt = $db->prepare("
+                    SELECT up, down, total, expiry_time, enable 
+                    FROM client_traffics 
+                    WHERE email = ? AND inbound_id = ?
+                    LIMIT 1
+                ");
+                $trafficStmt->execute([$clientEmail, $row['id']]);
+                $traffic = $trafficStmt->fetch(PDO::FETCH_ASSOC);
+                
+                // Если нет в client_traffics - создаём запись по умолчанию
+                if (!$traffic) {
+                    $traffic = [
+                        'up' => 0,
+                        'down' => 0,
+                        'total' => $client['totalGB'] ?? 0,
+                        'expiry_time' => $client['expiryTime'] ?? 0,
+                        'enable' => isset($client['enable']) ? ($client['enable'] ? 1 : 0) : 1
+                    ];
+                }
+                
+                // Генерация ссылки
                 $generatedLink = null;
-                $remarkStr = !empty($row['remark']) ? $row['remark']."-".$client['email'] : $client['email'];
-
+                $protocol = strtolower($row['protocol']);
+                $remarkStr = !empty($row['remark']) ? $row['remark']."-".$clientEmail : $clientEmail;
+                
                 if ($protocol === 'vless') {
                     $reality = $stream['realitySettings'] ?? [];
                     $networkType = $stream['network'] ?? 'tcp';
-
+                    
                     $paramsArray = [
                         'type' => $networkType,
                         'security' => $stream['security'] ?? 'reality',
@@ -143,30 +166,31 @@ try {
                         'spx' => $reality['settings']['spiderX'] ?? '/',
                         'flow' => $client['flow'] ?? ''
                     ];
-
+                    
                     if ($networkType === 'grpc' && !empty($stream['grpcSettings'])) {
                         $paramsArray['serviceName'] = $stream['grpcSettings']['serviceName'] ?? '';
                         if (!empty($stream['grpcSettings']['mode'])) {
                             $paramsArray['mode'] = $stream['grpcSettings']['mode'];
                         }
                     }
-
+                    
+                    // Убираем пустые параметры
+                    $paramsArray = array_filter($paramsArray, function($value) {
+                        return $value !== '' && $value !== null;
+                    });
+                    
                     $params = http_build_query($paramsArray);
-                    $generatedLink = "vless://{$client['id']}@{$host}:{$row['port']}?{$params}#" . urlencode($remarkStr);
-                
+                    $generatedLink = "vless://{$client['id']}@{$host}:{$row['port']}?" . $params . "#" . urlencode($remarkStr);
+                    
                 } elseif ($protocol === 'hysteria2' || $protocol === 'hysteria') {
-                    // В 3X-UI пароль клиента лежит в поле auth
                     $password = $client['auth'] ?? $client['password'] ?? $client['id'] ?? '';
                     $hyParams = [];
-
                     $tls = $stream['tlsSettings'] ?? [];
                     
-                    // ALPN
                     if (!empty($tls['alpn']) && is_array($tls['alpn'])) {
                         $hyParams['alpn'] = implode(',', $tls['alpn']);
                     }
-
-                    // Finalmask и обфускация
+                    
                     if (!empty($stream['finalmask'])) {
                         $hyParams['fm'] = json_encode($stream['finalmask']);
                         if (isset($stream['finalmask']['udp'][0]['type'])) {
@@ -177,42 +201,39 @@ try {
                             }
                         }
                     }
-
-                    // Fingerprint
+                    
                     $fp = $tls['settings']['fingerprint'] ?? $tls['fingerprint'] ?? 'chrome';
                     if ($fp) $hyParams['fp'] = $fp;
-
-                    // Security
+                    
                     $hyParams['security'] = $stream['security'] ?? 'tls';
-
-                    // SNI
+                    
                     $sni = $tls['serverName'] ?? $settings['serverName'] ?? '';
                     if ($sni) $hyParams['sni'] = $sni;
-
+                    
                     $paramsStr = http_build_query($hyParams);
                     $generatedLink = "hysteria2://{$password}@{$host}:{$row['port']}" . ($paramsStr ? "?{$paramsStr}" : "") . "#" . urlencode($remarkStr);
                 }
-
+                
                 $statData = [
-                    'email' => $row['email'],
+                    'email' => $clientEmail,
                     'link' => $generatedLink,
                     'stats' => [
-                        'up' => (int)$row['up'],
-                        'down' => (int)$row['down'],
-                        'total' => (int)$row['total'],
-                        'expiry' => (int)$row['expiry_time']
+                        'up' => (int)$traffic['up'],
+                        'down' => (int)$traffic['down'],
+                        'total' => (int)$traffic['total'],
+                        'expiry' => (int)$traffic['expiry_time']
                     ]
                 ];
-
+                
                 if ($isSingleEmail) {
                     echo json_encode([
-                        "email"       => $email,
-                        "up"          => (int)$stats['up'],
-                        "down"        => (int)$stats['down'],
-                        "total"       => (int)$stats['total'],
-                        "expiry_time" => (int)$stats['expiry_time'],
-                        "is_active"   => (bool)$stats['enable'],
-                        "link"        => $generatedLink
+                        "email" => $clientEmail,
+                        "up" => (int)$traffic['up'],
+                        "down" => (int)$traffic['down'],
+                        "total" => (int)$traffic['total'],
+                        "expiry_time" => (int)$traffic['expiry_time'],
+                        "is_active" => (bool)$traffic['enable'],
+                        "link" => $generatedLink
                     ], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
                     exit;
                 } else {
@@ -224,13 +245,17 @@ try {
         if (!$isSingleEmail) {
             echo json_encode($results, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
             exit;
+        } else {
+            // Если single email не найден
+            http_response_code(404);
+            echo json_encode(["error" => "User not found"]);
+            exit;
         }
-
     }
-
+    
     http_response_code(404);
     echo json_encode(["error" => "Route not found"]);
-
+    
 } catch (Exception $e) {
     error_log("CRITICAL ERROR: " . $e->getMessage());
     http_response_code(500);
