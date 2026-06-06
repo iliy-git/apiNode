@@ -13,6 +13,7 @@ if (!$savedKey || $userToken !== $savedKey) {
 }
 
 $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+$uri = rtrim($uri, '/'); // Приводим к единому виду (корень станет пустым "")
 
 if ($uri === '/ping') {
     echo json_encode([
@@ -29,7 +30,7 @@ try {
         PDO::ATTR_TIMEOUT => 5
     ]);
 
-    // Endpoint для продления подписки
+    // === 1. ENDPOINT: ПОДТВЕРЖДЕНИЕ И ПРОДЛЕНИЕ ПОДПИСКИ ===
     if ($uri === '/email/extend' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $input = json_decode(file_get_contents('php://input'), true);
         $email = $input['email'] ?? null;
@@ -102,18 +103,49 @@ try {
         exit;
     }
     
-    // Получение статистики по email
-    if ($uri === '/email' && $_SERVER['REQUEST_METHOD'] === 'GET') {
-        $email = $_GET['email'] ?? null;
-        
-        if (!$email) {
-            http_response_code(400);
-            exit(json_encode(["error" => "Email parameter is required"]));
+    // === 2. ENDPOINT: ВЫГРУЗКА ВСЕХ КОНФИГОВ (Корень /) ===
+    if (($uri === '' || $uri === '/') && $_SERVER['REQUEST_METHOD'] === 'GET' && !isset($_GET['email'])) {
+        $host = explode(':', $_SERVER['HTTP_HOST'] ?? '127.0.0.1')[0];
+
+        $query = "
+            SELECT id, port, remark, protocol, settings, stream_settings
+            FROM inbounds
+            WHERE protocol IN ('vless', 'hysteria2', 'hysteria')
+            AND settings IS NOT NULL
+        ";
+        $stmt = $db->query($query);
+        $allConfigs = [];
+
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            $settings = json_decode($row['settings'], true) ?? [];
+            $stream = json_decode($row['stream_settings'], true) ?? [];
+
+            if (!isset($settings['clients']) || !is_array($settings['clients'])) {
+                continue;
+            }
+
+            foreach ($settings['clients'] as $client) {
+                $clientEmail = $client['email'] ?? 'Without-email';
+                $generatedLink = generateLink($row, $client, $stream, $host);
+
+                if ($generatedLink) {
+                    $allConfigs[] = [
+                        'email' => $clientEmail,
+                        'link'  => $generatedLink
+                    ];
+                }
+            }
         }
-        
+
+        echo json_encode($allConfigs, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    
+    // === 3. ENDPOINT: СТАТИСТИКА ОДНОГО КЛИЕНТА (По email) ===
+    if (($uri === '/email' || $uri === '' || $uri === '/') && $_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['email'])) {
+        $email = $_GET['email'];
         $host = explode(':', $_SERVER['HTTP_HOST'] ?? '127.0.0.1')[0];
         
-        // Получаем инбаунд с нужным email
         $query = "
             SELECT id, port, remark, protocol, settings, stream_settings
             FROM inbounds
@@ -153,7 +185,7 @@ try {
                     $trafficStmt->execute([$email]);
                     $traffic = $trafficStmt->fetch(PDO::FETCH_ASSOC);
                     
-                    // Если нет в client_traffics - берем из client
+                    // Если нет в client_traffics - берем из clients
                     if (!$traffic || ($traffic['up'] == 0 && $traffic['down'] == 0)) {
                         $clientStmt = $db->prepare("
                             SELECT expiry_time, enable, totalGB as total
@@ -173,7 +205,6 @@ try {
                         ];
                     }
                     
-                    // Генерация ссылки
                     $generatedLink = generateLink($row, $client, $stream, $host);
                     
                     $totalUsed = (int)$traffic['up'] + (int)$traffic['down'];
@@ -183,7 +214,6 @@ try {
                     $isExpired = ($expiryTime > 0 && $expiryTime < $nowMs);
                     $isActive = ($traffic['enable'] == 1 && !$isExpired && ($totalLimit == 0 || $totalUsed < $totalLimit));
                     
-                    // Формируем ответ в формате, который ожидает Laravel
                     $result = [
                         'email' => $email,
                         'link' => $generatedLink,
@@ -204,14 +234,13 @@ try {
             http_response_code(404);
             echo json_encode(["error" => "User not found", "email" => $email]);
         } else {
-            // Возвращаем в формате, который ожидает Laravel
             echo json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
         exit;
     }
     
     http_response_code(404);
-    echo json_encode(["error" => "Route not found"]);
+    echo json_encode(["error" => "Route not found", "uri" => $_SERVER['REQUEST_URI']]);
     
 } catch (Exception $e) {
     error_log("CRITICAL ERROR: " . $e->getMessage());
@@ -225,7 +254,9 @@ try {
 // Функция для генерации ссылок
 function generateLink($inbound, $client, $stream, $host) {
     $protocol = strtolower($inbound['protocol']);
-    $remarkStr = !empty($inbound['remark']) ? $inbound['remark'] : $client['email'];
+    
+    // Склейка имени инбаунда и email для точного совпадения ремарки
+    $remarkStr = !empty($inbound['remark']) ? ($inbound['remark'] . "-" . $client['email']) : $client['email'];
     
     if ($protocol === 'vless') {
         $reality = $stream['realitySettings'] ?? [];
@@ -246,6 +277,12 @@ function generateLink($inbound, $client, $stream, $host) {
         if ($networkType === 'grpc' && !empty($stream['grpcSettings'])) {
             $grpcSettings = $stream['grpcSettings'];
             $paramsArray['serviceName'] = $grpcSettings['serviceName'] ?? '';
+            
+            // Вытаскиваем mode (multi/single)
+            if (!empty($grpcSettings['mode'])) {
+                $paramsArray['mode'] = $grpcSettings['mode'];
+            }
+            
             if (!empty($grpcSettings['authority'])) {
                 $paramsArray['authority'] = $grpcSettings['authority'];
             } elseif (!empty($reality['serverNames'][0])) {
@@ -269,6 +306,8 @@ function generateLink($inbound, $client, $stream, $host) {
         $paramsArray = array_filter($paramsArray, function($value) {
             return $value !== '' && $value !== null;
         });
+        
+        ksort($paramsArray); // Сортируем параметры для красоты
         
         $params = http_build_query($paramsArray);
         return "vless://{$client['id']}@{$host}:{$inbound['port']}?" . $params . "#" . urlencode($remarkStr);
@@ -304,6 +343,8 @@ function generateLink($inbound, $client, $stream, $host) {
         
         $sni = $tls['serverName'] ?? $tls['settings']['serverName'] ?? '';
         if ($sni) $hyParams['sni'] = $sni;
+        
+        ksort($hyParams);
         
         $paramsStr = http_build_query($hyParams);
         return "hysteria2://{$password}@{$host}:{$inbound['port']}" . ($paramsStr ? "?{$paramsStr}" : "") . "#" . urlencode($remarkStr);
