@@ -55,11 +55,12 @@ try {
         
         $baseTime = ($currentExpiry > $nowMs) ? $currentExpiry : $nowMs;
         $newExpiry = $baseTime + ($days * 86400 * 1000);
-        
+
+        $resetTrafficSql = ($days >= 30) ? ", up = 0, down = 0" : "";
         // Обновляем во всех таблицах
         $stmtTraffic = $db->prepare("
             UPDATE client_traffics 
-            SET expiry_time = ?, enable = 1 
+            SET expiry_time = ?, enable = 1 {$resetTrafficSql}
             WHERE email = ?
         ");
         $stmtTraffic->execute([$newExpiry, $email]);
