@@ -189,7 +189,7 @@ try {
                     // Если нет в client_traffics - берем из clients
                     if (!$traffic || ($traffic['up'] == 0 && $traffic['down'] == 0)) {
                         $clientStmt = $db->prepare("
-                            SELECT expiry_time, enable, totalGB as total
+                            SELECT expiry_time, enable, total_gb
                             FROM clients
                             WHERE email = ?
                             LIMIT 1
