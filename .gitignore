@@ -1,0 +1,4 @@
+.key
+get-docker.sh
+*.log
+.DS_Store
