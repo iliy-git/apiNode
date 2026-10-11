@@ -487,4 +487,86 @@ class ClientService
             "removed_from_inbounds" => $removedFromInbounds,
         ];
     }
+    public static function getAllClientsStats(string $host): array
+    {
+        $db = Database::getConnection();
+
+        // 1. Собираем статистику трафика по всем email сразу
+        $trafficStmt = $db->query("
+            SELECT
+                email,
+                COALESCE(SUM(up), 0) as up,
+                COALESCE(SUM(down), 0) as down,
+                MAX(expiry_time) as expiry_time,
+                MAX(enable) as enable,
+                COALESCE(MAX(total), 0) as total
+            FROM client_traffics
+            GROUP BY email
+        ");
+        $traffics = [];
+        while ($row = $trafficStmt->fetch()) {
+            $traffics[$row['email']] = $row;
+        }
+
+        // 2. Получаем все инбаунды
+        $inboundsStmt = $db->query("
+            SELECT id, port, remark, protocol, settings, stream_settings
+            FROM inbounds
+            WHERE settings IS NOT NULL
+        ");
+        $inbounds = $inboundsStmt->fetchAll();
+
+        $nowMs = (int)(microtime(true) * 1000);
+        $result = [];
+
+        foreach ($inbounds as $inbound) {
+            $settings = json_decode($inbound['settings'] ?? '{}', true) ?? [];
+            $stream = json_decode($inbound['stream_settings'] ?? '{}', true) ?? [];
+
+            if (!isset($settings['clients']) || !is_array($settings['clients'])) {
+                continue;
+            }
+
+            foreach ($settings['clients'] as $client) {
+                $email = $client['email'] ?? '';
+                if ($email === '') {
+                    continue;
+                }
+
+                $traffic = $traffics[$email] ?? null;
+
+                $up = $traffic ? (int)$traffic['up'] : 0;
+                $down = $traffic ? (int)$traffic['down'] : 0;
+                $totalUsed = $up + $down;
+                $totalLimit = $traffic && $traffic['total'] > 0
+                    ? (int)$traffic['total']
+                    : (int)($client['totalGB'] ?? 0);
+                $expiryTime = $traffic && $traffic['expiry_time'] > 0
+                    ? (int)$traffic['expiry_time']
+                    : (int)($client['expiryTime'] ?? 0);
+                $enable = $traffic ? (bool)$traffic['enable'] : (bool)($client['enable'] ?? true);
+
+                $isExpired = ($expiryTime > 0 && $expiryTime < $nowMs);
+                $isActive = ($enable && !$isExpired && ($totalLimit == 0 || $totalUsed < $totalLimit));
+
+                $generatedLink = LinkGenerator::generate($inbound, $client, $stream, $host);
+
+                $result[] = [
+                    'email'       => $email,
+                    'inbound_id'  => (int)$inbound['id'],
+                    'link'        => $generatedLink,
+                    'up'          => $up,
+                    'down'        => $down,
+                    'total'       => $totalLimit,
+                    'expiry_time' => $expiryTime,
+                    'is_active'   => $isActive,
+                    'enable'      => $enable,
+                ];
+            }
+        }
+
+        return $result;
+    }
+
+
 }

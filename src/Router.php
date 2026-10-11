@@ -34,6 +34,12 @@ class Router
             ], 200, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
         }
 
+                // Список всех клиентов со статистикой: GET /clients или GET /stats
+        if (($uri === '/clients' || $uri === '/stats') && $method === 'GET') {
+            $clients = ClientService::getAllClientsStats($host);
+            Response::json($clients);
+        }
+
         // 3. Выгрузка всех конфигов: GET / или корень
         if (($uri === '' || $uri === '/') && $method === 'GET' && !isset($_GET['email'])) {
             $configs = InboundService::getAllConfigs($host);
