@@ -33,7 +33,6 @@ class ClientService
                     continue;
                 }
 
-                // Статистика из client_traffics
                 $trafficStmt = $db->prepare("
                     SELECT
                         COALESCE(SUM(up), 0) as up,
@@ -47,7 +46,6 @@ class ClientService
                 $trafficStmt->execute([$email]);
                 $traffic = $trafficStmt->fetch();
 
-                // Фолбэк на таблицу clients
                 if (!$traffic || ($traffic['up'] == 0 && $traffic['down'] == 0)) {
                     $clientStmt = $db->prepare("
                         SELECT expiry_time, enable, total_gb
@@ -95,7 +93,51 @@ class ClientService
     public static function extend(string $email, int $days): array
     {
         $db = Database::getConnection();
+        $db->beginTransaction();
 
+        try {
+            $result = self::processSingleExtend($db, $email, $days);
+            $db->commit();
+        } catch (\Throwable $e) {
+            $db->rollBack();
+            throw $e;
+        }
+
+        Config::triggerRestart();
+
+        return $result;
+    }
+
+    public static function extendBatch(array $emails, int $days): array
+    {
+        $db = Database::getConnection();
+        $db->beginTransaction();
+
+        $results = [];
+        try {
+            foreach ($emails as $email) {
+                $email = trim((string)$email);
+                if ($email !== '') {
+                    $results[] = self::processSingleExtend($db, $email, $days);
+                }
+            }
+            $db->commit();
+        } catch (\Throwable $e) {
+            $db->rollBack();
+            throw $e;
+        }
+
+        Config::triggerRestart();
+
+        return [
+            "status"  => "success",
+            "count"   => count($results),
+            "results" => $results,
+        ];
+    }
+
+    private static function processSingleExtend(PDO $db, string $email, int $days): array
+    {
         $stmtCurrent = $db->prepare("
             SELECT expiry_time FROM client_traffics
             WHERE email = ?
@@ -111,8 +153,6 @@ class ClientService
         $newExpiry = $baseTime + ($days * 86400 * 1000);
 
         $resetTrafficSql = ($days >= 30) ? ", up = 0, down = 0" : "";
-
-        $db->beginTransaction();
 
         $stmtTraffic = $db->prepare("
             UPDATE client_traffics
@@ -149,10 +189,6 @@ class ClientService
             }
         }
 
-        $db->commit();
-
-        Config::triggerRestart();
-
         return [
             "status"          => "success",
             "message"         => "Extended by {$days} days",
@@ -165,13 +201,63 @@ class ClientService
     public static function addOrUpdate(int $inboundId, string $email, int $totalGB, int $days): array
     {
         $db = Database::getConnection();
+        $db->beginTransaction();
 
+        try {
+            $result = self::processSingleAddOrUpdate($db, $inboundId, $email, $totalGB, $days);
+            $db->commit();
+        } catch (\Throwable $e) {
+            $db->rollBack();
+            throw $e;
+        }
+
+        Config::triggerRestart();
+
+        return $result;
+    }
+
+    public static function addOrUpdateBatch(array $items): array
+    {
+        $db = Database::getConnection();
+        $db->beginTransaction();
+
+        $results = [];
+        try {
+            foreach ($items as $item) {
+                $inboundId = (int)($item['inbound_id'] ?? 0);
+                $email     = trim((string)($item['email'] ?? ''));
+                $totalGB   = (int)($item['totalGB'] ?? 0);
+                $days      = (int)($item['days'] ?? 30);
+
+                if ($inboundId <= 0 || $email === '') {
+                    continue;
+                }
+
+                $results[] = self::processSingleAddOrUpdate($db, $inboundId, $email, $totalGB, $days);
+            }
+            $db->commit();
+        } catch (\Throwable $e) {
+            $db->rollBack();
+            throw $e;
+        }
+
+        Config::triggerRestart();
+
+        return [
+            "status"  => "success",
+            "count"   => count($results),
+            "results" => $results,
+        ];
+    }
+
+    private static function processSingleAddOrUpdate(PDO $db, int $inboundId, string $email, int $totalGB, int $days): array
+    {
         $stmtInbound = $db->prepare("SELECT id, protocol, settings FROM inbounds WHERE id = ?");
         $stmtInbound->execute([$inboundId]);
         $inbound = $stmtInbound->fetch();
 
         if (!$inbound) {
-            throw new \RuntimeException("Inbound not found", 404);
+            throw new \RuntimeException("Inbound not found (ID: {$inboundId})", 404);
         }
 
         $settings = json_decode($inbound['settings'] ?? '{}', true) ?? [];
@@ -234,8 +320,6 @@ class ClientService
             ];
         }
 
-        $db->beginTransaction();
-
         $updateInbound = $db->prepare("UPDATE inbounds SET settings = ? WHERE id = ?");
         $updateInbound->execute([json_encode($settings, JSON_UNESCAPED_UNICODE), $inboundId]);
 
@@ -275,10 +359,6 @@ class ClientService
         ");
         $stmtTraffic->execute([$inboundId, $email, $expiryTime, $totalBytes]);
 
-        $db->commit();
-
-        Config::triggerRestart();
-
         return [
             "status"      => "success",
             "message"     => "Client configured and Xray restarted",
@@ -295,10 +375,53 @@ class ClientService
         $db = Database::getConnection();
         $db->beginTransaction();
 
+        try {
+            $result = self::processSingleDelete($db, $email, $inboundId);
+            $db->commit();
+        } catch (\Throwable $e) {
+            $db->rollBack();
+            throw $e;
+        }
+
+        Config::triggerRestart();
+
+        return $result;
+    }
+
+    public static function deleteBatch(array $emails, ?int $inboundId = null): array
+    {
+        $db = Database::getConnection();
+        $db->beginTransaction();
+
+        $results = [];
+        try {
+            foreach ($emails as $email) {
+                $email = trim((string)$email);
+                if ($email !== '') {
+                    $results[] = self::processSingleDelete($db, $email, $inboundId);
+                }
+            }
+            $db->commit();
+        } catch (\Throwable $e) {
+            $db->rollBack();
+            throw $e;
+        }
+
+        Config::triggerRestart();
+
+        return [
+            "status"  => "success",
+            "count"   => count($results),
+            "results" => $results,
+        ];
+    }
+
+    private static function processSingleDelete(PDO $db, string $email, ?int $inboundId = null): array
+    {
         $inboundsQuery = $inboundId && $inboundId > 0
             ? "SELECT id, settings FROM inbounds WHERE id = ?"
             : "SELECT id, settings FROM inbounds WHERE settings IS NOT NULL";
-        
+
         $stmtInbounds = $db->prepare($inboundsQuery);
         $stmtInbounds->execute($inboundId && $inboundId > 0 ? [$inboundId] : []);
         $inbounds = $stmtInbounds->fetchAll();
@@ -320,7 +443,6 @@ class ClientService
             }
         }
 
-        // Удаление связей из client_inbounds
         if ($inboundId && $inboundId > 0) {
             $stmtDelRel = $db->prepare("
                 DELETE FROM client_inbounds 
@@ -329,7 +451,6 @@ class ClientService
             ");
             $stmtDelRel->execute([$inboundId, $email]);
 
-            // Проверяем, остались ли другие инбаунды у клиента
             $stmtCheck = $db->prepare("
                 SELECT COUNT(*) FROM client_inbounds 
                 WHERE client_id IN (SELECT id FROM clients WHERE email = ?)
@@ -345,7 +466,6 @@ class ClientService
                 $stmtDelClient->execute([$email]);
             }
         } else {
-            // Удаляем отовсюду
             $stmtDelRel = $db->prepare("
                 DELETE FROM client_inbounds 
                 WHERE client_id IN (SELECT id FROM clients WHERE email = ?)
@@ -359,15 +479,11 @@ class ClientService
             $stmtDelClient->execute([$email]);
         }
 
-        $db->commit();
-
-        Config::triggerRestart();
-
         return [
-            "status"     => "success",
-            "message"    => "Client removed successfully",
-            "email"      => $email,
-            "inbound_id" => $inboundId,
+            "status"                => "success",
+            "message"               => "Client removed successfully",
+            "email"                 => $email,
+            "inbound_id"            => $inboundId,
             "removed_from_inbounds" => $removedFromInbounds,
         ];
     }
