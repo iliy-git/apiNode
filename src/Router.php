@@ -2,6 +2,7 @@
 
 namespace App;
 
+use App\Services\BackupService;
 use App\Services\ClientService;
 use App\Services\InboundService;
 use Throwable;
@@ -134,6 +135,33 @@ class Router
         if ($uri === '/xray/sync' && ($method === 'POST' || $method === 'GET')) {
             $syncResult = ClientService::syncAllActiveClients();
             Response::json($syncResult);
+        }
+
+        // 10. Запрос бэкапа: GET /backup (или /backup/download)
+        if (($uri === '/backup' || $uri === '/backup/download') && $method === 'GET') {
+            $format = strtolower(trim((string)($_GET['format'] ?? 'file')));
+            if ($format === 'json') {
+                $data = BackupService::exportJsonBackup($host);
+                Response::json($data);
+            } else {
+                BackupService::downloadDbBackup($host);
+            }
+        }
+
+        // 11. Восстановление из бэкапа: POST /backup/restore
+        if ($uri === '/backup/restore' && $method === 'POST') {
+            if (!empty($_FILES['backup']['tmp_name'])) {
+                $result = BackupService::restoreFromDb($_FILES['backup']['tmp_name']);
+                Response::json($result);
+            } else {
+                $input = self::getJsonInput();
+                if (!empty($input['inbounds']) || !empty($input['data']['inbounds']) || !empty($input['database_base64'])) {
+                    $result = BackupService::restoreFromJsonOrBase64($input);
+                    Response::json($result);
+                } else {
+                    Response::error("No backup file or JSON payload provided", 400);
+                }
+            }
         }
 
         // 404 Route Not Found

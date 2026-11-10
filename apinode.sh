@@ -47,11 +47,6 @@ get_current_key() {
     fi
 }
 
-# Функция получения внешних IP
-get_external_ips() {
-    ip -4 addr show scope global | awk '/inet / {print $2}' | cut -d/ -f1
-}
-
 # Функция открытия порта в файрволе
 open_port() {
     local port="$1"
@@ -160,6 +155,30 @@ manage_key() {
     esac
 }
 
+# Создание локального бэкапа
+create_backup() {
+    local port
+    port=$(get_current_port)
+    local key
+    key=$(get_current_key)
+    local backup_dir="$TARGET_DIR/backups"
+    mkdir -p "$backup_dir"
+
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file="$backup_dir/backup_${timestamp}.db"
+
+    echo -e "${yellow}Создание консистентного бэкапа базы данных...${plain}"
+    curl -k -s -H "X-API-KEY: $key" "https://127.0.0.1:${port}/backup" -o "$backup_file"
+
+    if [ -s "$backup_file" ]; then
+        echo -e "${green}✅ Бэкап успешно создан:${plain} $backup_file ($(du -h "$backup_file" | cut -f1))"
+    else
+        rm -f "$backup_file"
+        echo -e "${red}❌ Ошибка создания бэкапа.${plain}"
+    fi
+}
+
 # Синхронизация клиентов в Xray
 sync_clients() {
     local port
@@ -223,16 +242,17 @@ show_menu() {
 ┠────────────────────────────────────────────────┨
 │  ${green}6.${plain} Изменить порт API (откроется в файрволе)   │
 │  ${green}7.${plain} Управление API-ключом (показать/сменить)   │
-│  ${green}8.${plain} Синхронизировать клиентов в память Xray   │
-│  ${green}9.${plain} Показать все IP-адреса сервера             │
+│  ${green}8.${plain} Создать локальный бэкап базы данных       │
+│  ${green}9.${plain} Синхронизировать клиентов в память Xray   │
+│  ${green}10.${plain} Показать все IP-адреса сервера            │
 ┠────────────────────────────────────────────────┨
-│  ${green}10.${plain} Обновить apiNode из GitHub                │
-│  ${green}11.${plain} Удалить apiNode                            │
+│  ${green}11.${plain} Обновить apiNode из GitHub                │
+│  ${green}12.${plain} Удалить apiNode                           │
 ┠────────────────────────────────────────────────┨
 │  ${green}0.${plain} Выход                                      │
 ╚────────────────────────────────────────────────╝
 "
-    read -r -p "Выберите пункт меню [0-11]: " num
+    read -r -p "Выберите пункт меню [0-12]: " num
     case "$num" in
         0) exit 0 ;;
         1) check_status; before_show_menu ;;
@@ -242,10 +262,11 @@ show_menu() {
         5) docker compose logs -f --tail=100 ;;
         6) change_port; before_show_menu ;;
         7) manage_key; before_show_menu ;;
-        8) sync_clients; before_show_menu ;;
-        9) show_ips; before_show_menu ;;
-        10) update_project; before_show_menu ;;
-        11)
+        8) create_backup; before_show_menu ;;
+        9) sync_clients; before_show_menu ;;
+        10) show_ips; before_show_menu ;;
+        11) update_project; before_show_menu ;;
+        12)
             read -r -p "Вы уверены, что хотите удалить контейнеры apiNode? [y/N]: " confirm_del
             if [[ "$confirm_del" =~ ^[yY]$ ]]; then
                 docker compose down -v
@@ -295,6 +316,7 @@ case "$1" in
             manage_key
         fi
         ;;
+    backup)  create_backup ;;
     sync)    sync_clients ;;
     ip|ips)  show_ips ;;
     update)  update_project ;;
