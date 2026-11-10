@@ -20,19 +20,30 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # 2. Определение директории проекта
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-TARGET_DIR="/home/iliy/apiNode"
-
-if [ -f "$SCRIPT_DIR/docker-compose.yaml" ]; then
-    PROJECT_DIR="$SCRIPT_DIR"
+if [ -f "$PWD/docker-compose.yaml" ]; then
+    PROJECT_DIR="$PWD"
+elif [ -d "/home/iliy/apiNode" ]; then
+    PROJECT_DIR="/home/iliy/apiNode"
 else
-    if [ ! -d "$TARGET_DIR" ]; then
-        echo -e "${CYAN}Клонируем репозиторий apiNode...${NC}"
-        git clone https://github.com/iliy-git/apiNode.git "$TARGET_DIR"
+    PROJECT_DIR="/home/iliy/apiNode"
+fi
+
+if [ ! -d "$PROJECT_DIR" ]; then
+    echo -e "${CYAN}Клонируем репозиторий apiNode в $PROJECT_DIR...${NC}"
+    git clone https://github.com/iliy-git/apiNode.git "$PROJECT_DIR"
+else
+    echo -e "${CYAN}Обновляем репозиторий в $PROJECT_DIR...${NC}"
+    cd "$PROJECT_DIR"
+    if [ -d ".git" ]; then
+        git pull origin main 2>/dev/null || true
     fi
-    PROJECT_DIR="$TARGET_DIR"
 fi
 cd "$PROJECT_DIR"
+
+# Гарантия наличия apinode.sh
+if [ ! -f "$PROJECT_DIR/apinode.sh" ]; then
+    curl -sSL https://raw.githubusercontent.com/iliy-git/apiNode/main/apinode.sh -o "$PROJECT_DIR/apinode.sh"
+fi
 
 # 3. Выбор порта
 DEFAULT_PORT="11223"

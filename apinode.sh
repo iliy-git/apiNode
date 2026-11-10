@@ -8,10 +8,21 @@ yellow='\033[0;33m'
 cyan='\033[0;36m'
 plain='\033[0m'
 
-# Определение рабочей директории
-TARGET_DIR="/home/iliy/apiNode"
-if [ -f "$(dirname "$0")/docker-compose.yaml" ]; then
-    TARGET_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Определение директории проекта через разыменование симлинка
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+TARGET_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+if [ ! -f "$TARGET_DIR/docker-compose.yaml" ]; then
+    if [ -f "/home/iliy/apiNode/docker-compose.yaml" ]; then
+        TARGET_DIR="/home/iliy/apiNode"
+    elif [ -f "$PWD/docker-compose.yaml" ]; then
+        TARGET_DIR="$PWD"
+    fi
 fi
 cd "$TARGET_DIR" || exit 1
 
