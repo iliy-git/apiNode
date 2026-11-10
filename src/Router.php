@@ -34,19 +34,19 @@ class Router
             ], 200, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
         }
 
-                // Список всех клиентов со статистикой: GET /clients или GET /stats
+        // 3. Список всех клиентов со статистикой: GET /clients или GET /stats
         if (($uri === '/clients' || $uri === '/stats') && $method === 'GET') {
             $clients = ClientService::getAllClientsStats($host);
             Response::json($clients);
         }
 
-        // 3. Выгрузка всех конфигов: GET / или корень
+        // 4. Выгрузка всех конфигов: GET / или корень
         if (($uri === '' || $uri === '/') && $method === 'GET' && !isset($_GET['email'])) {
             $configs = InboundService::getAllConfigs($host);
             Response::json($configs);
         }
 
-        // 4. Статистика по конкретному клиенту: GET /email?email=...
+        // 5. Статистика по конкретному клиенту: GET /email?email=...
         if (($uri === '/email' || $uri === '' || $uri === '/') && $method === 'GET' && isset($_GET['email'])) {
             $email = trim((string)$_GET['email']);
             if ($email === '') {
@@ -61,7 +61,7 @@ class Router
             Response::json($stats);
         }
 
-        // 5. Продление: POST /email/extend (одиночное или пачка)
+        // 6. Продление: POST /email/extend (одиночное или пачка)
         if ($uri === '/email/extend' && $method === 'POST') {
             $input = self::getJsonInput();
             $days  = (int)($input['days'] ?? 30);
@@ -80,15 +80,15 @@ class Router
             }
         }
 
-        // 6. Добавление / обновление: POST /client/add (одиночное или пачка)
+        // 7. Добавление / обновление: POST /client/add (одиночное или пачка)
         if ($uri === '/client/add' && $method === 'POST') {
             $input = self::getJsonInput();
 
             if (isset($input['clients']) && is_array($input['clients'])) {
-                $result = ClientService::addOrUpdateBatch($input['clients']);
+                $result = ClientService::addOrUpdateBatch($input['clients'], $host);
                 Response::json($result);
             } elseif (isset($input[0]) && is_array($input[0])) {
-                $result = ClientService::addOrUpdateBatch($input);
+                $result = ClientService::addOrUpdateBatch($input, $host);
                 Response::json($result);
             } else {
                 $inboundId = (int)($input['inbound_id'] ?? 0);
@@ -100,12 +100,12 @@ class Router
                     Response::error("inbound_id and email are required", 400);
                 }
 
-                $result = ClientService::addOrUpdate($inboundId, $email, $totalGB, $days);
+                $result = ClientService::addOrUpdate($inboundId, $email, $totalGB, $days, $host);
                 Response::json($result);
             }
         }
 
-        // 7. Удаление: POST /client/delete (одиночное или пачка)
+        // 8. Удаление: POST /client/delete (одиночное или пачка)
         if ($uri === '/client/delete' && $method === 'POST') {
             $input = self::getJsonInput();
 
@@ -128,6 +128,12 @@ class Router
                 $result = ClientService::delete($email, $inboundId);
                 Response::json($result);
             }
+        }
+
+        // 9. Синхронизация всех клиентов в память Xray: POST|GET /xray/sync
+        if ($uri === '/xray/sync' && ($method === 'POST' || $method === 'GET')) {
+            $syncResult = ClientService::syncAllActiveClients();
+            Response::json($syncResult);
         }
 
         // 404 Route Not Found

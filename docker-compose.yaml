@@ -2,24 +2,25 @@ services:
   app:
     image: php:8.3-fpm-alpine
     container_name: x-ui-api-mini
+    network_mode: host
     command: php-fpm -F -R
     volumes:
       - .:/app
       - /etc/x-ui:/etc/x-ui:rw
       - ./php/fpm-pool.conf:/usr/local/etc/php-fpm.d/zz-root.conf:ro
+      - /usr/local/x-ui/bin/xray-linux-amd64:/usr/local/bin/xray:ro
     working_dir: /app
     restart: always
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: 10m
+        max-file: 3
 
   nginx:
     image: nginx:alpine
     container_name: vpn_nginx_ssl
-    ports:
-      - "11223:11223"
+    network_mode: host
     volumes:
       - .:/app:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
@@ -29,7 +30,7 @@ services:
       - app
     restart: always
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: 10m
+        max-file: 3

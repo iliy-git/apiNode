@@ -59,23 +59,25 @@ class ClientService
                     $traffic = [
                         'up'          => 0,
                         'down'        => 0,
-                        'expiry_time' => $client['expiryTime'] ?? ($clientData['expiry_time'] ?? 0),
-                        'enable'      => $client['enable'] ?? ($clientData['enable'] ?? 1),
-                        'total'       => $client['totalGB'] ?? ($clientData['total'] ?? 0),
+                        'total'       => $clientData['total_gb'] ?? $client['totalGB'] ?? 0,
+                        'expiry_time' => $clientData['expiry_time'] ?? $client['expiryTime'] ?? 0,
+                        'enable'      => $clientData ? (bool)$clientData['enable'] : ($client['enable'] ?? true),
                     ];
                 }
-
-                $generatedLink = LinkGenerator::generate($row, $client, $stream, $host);
 
                 $totalUsed = (int)$traffic['up'] + (int)$traffic['down'];
                 $totalLimit = (int)$traffic['total'];
                 $expiryTime = (int)$traffic['expiry_time'];
                 $nowMs = (int)(microtime(true) * 1000);
+
                 $isExpired = ($expiryTime > 0 && $expiryTime < $nowMs);
-                $isActive = ($traffic['enable'] == 1 && !$isExpired && ($totalLimit == 0 || $totalUsed < $totalLimit));
+                $isActive = ($traffic['enable'] && !$isExpired && ($totalLimit == 0 || $totalUsed < $totalLimit));
+
+                $generatedLink = LinkGenerator::generate($row, $client, $stream, $host);
 
                 return [
                     'email'       => $email,
+                    'inbound_id'  => (int)$row['id'],
                     'link'        => $generatedLink,
                     'up'          => (int)$traffic['up'],
                     'down'        => (int)$traffic['down'],
@@ -103,7 +105,8 @@ class ClientService
             throw $e;
         }
 
-        Config::triggerRestart();
+        // Обновляем клиента в памяти ядра Xray (без перезагрузки Xray)
+        self::ensureClientActiveInXray($email);
 
         return $result;
     }
@@ -127,7 +130,13 @@ class ClientService
             throw $e;
         }
 
-        Config::triggerRestart();
+        // Обновляем клиентов в памяти ядра Xray (без перезагрузки Xray)
+        foreach ($emails as $email) {
+            $email = trim((string)$email);
+            if ($email !== '') {
+                self::ensureClientActiveInXray($email);
+            }
+        }
 
         return [
             "status"  => "success",
@@ -198,25 +207,27 @@ class ClientService
         ];
     }
 
-    public static function addOrUpdate(int $inboundId, string $email, int $totalGB, int $days): array
+    public static function addOrUpdate(int $inboundId, string $email, int $totalGB, int $days, string $host = ''): array
     {
         $db = Database::getConnection();
         $db->beginTransaction();
 
         try {
-            $result = self::processSingleAddOrUpdate($db, $inboundId, $email, $totalGB, $days);
+            $result = self::processSingleAddOrUpdate($db, $inboundId, $email, $totalGB, $days, $host);
             $db->commit();
         } catch (\Throwable $e) {
             $db->rollBack();
             throw $e;
         }
 
-        Config::triggerRestart();
+        // Добавляем клиента в память Xray на лету (без перезагрузки Xray)
+        $xrayPush = self::pushClientToXray($inboundId, $email);
+        $result['xray_live_applied'] = $xrayPush;
 
         return $result;
     }
 
-    public static function addOrUpdateBatch(array $items): array
+    public static function addOrUpdateBatch(array $items, string $host = ''): array
     {
         $db = Database::getConnection();
         $db->beginTransaction();
@@ -233,7 +244,7 @@ class ClientService
                     continue;
                 }
 
-                $results[] = self::processSingleAddOrUpdate($db, $inboundId, $email, $totalGB, $days);
+                $results[] = self::processSingleAddOrUpdate($db, $inboundId, $email, $totalGB, $days, $host);
             }
             $db->commit();
         } catch (\Throwable $e) {
@@ -241,7 +252,10 @@ class ClientService
             throw $e;
         }
 
-        Config::triggerRestart();
+        // Применяем всех клиентов в память Xray на лету
+        foreach ($results as &$res) {
+            $res['xray_live_applied'] = self::pushClientToXray((int)$res['inbound_id'], $res['email']);
+        }
 
         return [
             "status"  => "success",
@@ -250,9 +264,9 @@ class ClientService
         ];
     }
 
-    private static function processSingleAddOrUpdate(PDO $db, int $inboundId, string $email, int $totalGB, int $days): array
+    private static function processSingleAddOrUpdate(PDO $db, int $inboundId, string $email, int $totalGB, int $days, string $host = ''): array
     {
-        $stmtInbound = $db->prepare("SELECT id, protocol, settings FROM inbounds WHERE id = ?");
+        $stmtInbound = $db->prepare("SELECT id, tag, port, protocol, settings, stream_settings, remark FROM inbounds WHERE id = ?");
         $stmtInbound->execute([$inboundId]);
         $inbound = $stmtInbound->fetch();
 
@@ -278,6 +292,7 @@ class ClientService
         );
         $subId = bin2hex(random_bytes(8));
         $auth  = bin2hex(random_bytes(8));
+        $flow  = '';
 
         $clientIndex = -1;
         foreach ($settings['clients'] as $idx => $c) {
@@ -296,7 +311,14 @@ class ClientService
             $clientUuid = $settings['clients'][$clientIndex]['id'] ?? $clientUuid;
             $subId      = $settings['clients'][$clientIndex]['subId'] ?? $subId;
             $auth       = $settings['clients'][$clientIndex]['auth'] ?? $auth;
+            $flow       = $settings['clients'][$clientIndex]['flow'] ?? $flow;
         } else {
+            // Если reality TCP, по умолчанию можно использовать xtls-rprx-vision
+            $stream = json_decode($inbound['stream_settings'] ?? '{}', true) ?? [];
+            if (($inbound['protocol'] ?? '') === 'vless' && ($stream['security'] ?? '') === 'reality' && ($stream['network'] ?? 'tcp') === 'tcp') {
+                $flow = 'xtls-rprx-vision';
+            }
+
             $settings['clients'][] = [
                 "id"              => $clientUuid,
                 "password"        => $clientUuid,
@@ -306,6 +328,7 @@ class ClientService
                 "expiryTime"      => $expiryTime,
                 "totalGB"         => $totalBytes,
                 "subId"           => $subId,
+                "flow"            => $flow,
                 "created_at"      => $nowMs,
                 "updated_at"      => $nowMs,
                 "limitIp"         => 0,
@@ -359,13 +382,27 @@ class ClientService
         ");
         $stmtTraffic->execute([$inboundId, $email, $expiryTime, $totalBytes]);
 
+        $link = '';
+        if ($host !== '') {
+            $stream = json_decode($inbound['stream_settings'] ?? '{}', true) ?? [];
+            $clientForLink = [
+                'id'       => $clientUuid,
+                'email'    => $email,
+                'flow'     => $flow,
+                'password' => $clientUuid,
+                'auth'     => $auth,
+            ];
+            $link = LinkGenerator::generate($inbound, $clientForLink, $stream, $host) ?? '';
+        }
+
         return [
             "status"      => "success",
-            "message"     => "Client configured and Xray restarted",
+            "message"     => "Client configured and activated in Xray (no restart)",
             "client_id"   => $clientId,
             "inbound_id"  => $inboundId,
             "email"       => $email,
             "uuid"        => $clientUuid,
+            "link"        => $link,
             "expiry_date" => $expiryTime > 0 ? date('Y-m-d H:i:s', (int)($expiryTime / 1000)) : "never",
         ];
     }
@@ -383,7 +420,12 @@ class ClientService
             throw $e;
         }
 
-        Config::triggerRestart();
+        // Удаляем из памяти Xray на лету (без перезагрузки Xray)
+        if (!empty($result['removed_inbound_tags'])) {
+            foreach ($result['removed_inbound_tags'] as $tag) {
+                XrayService::removeUser($tag, $email);
+            }
+        }
 
         return $result;
     }
@@ -407,7 +449,14 @@ class ClientService
             throw $e;
         }
 
-        Config::triggerRestart();
+        // Удаляем из памяти Xray на лету (без перезагрузки Xray)
+        foreach ($results as $res) {
+            if (!empty($res['removed_inbound_tags'])) {
+                foreach ($res['removed_inbound_tags'] as $tag) {
+                    XrayService::removeUser($tag, $res['email']);
+                }
+            }
+        }
 
         return [
             "status"  => "success",
@@ -419,14 +468,16 @@ class ClientService
     private static function processSingleDelete(PDO $db, string $email, ?int $inboundId = null): array
     {
         $inboundsQuery = $inboundId && $inboundId > 0
-            ? "SELECT id, settings FROM inbounds WHERE id = ?"
-            : "SELECT id, settings FROM inbounds WHERE settings IS NOT NULL";
+            ? "SELECT id, tag, settings FROM inbounds WHERE id = ?"
+            : "SELECT id, tag, settings FROM inbounds WHERE settings IS NOT NULL";
 
         $stmtInbounds = $db->prepare($inboundsQuery);
         $stmtInbounds->execute($inboundId && $inboundId > 0 ? [$inboundId] : []);
         $inbounds = $stmtInbounds->fetchAll();
 
         $removedFromInbounds = 0;
+        $removedInboundTags = [];
+
         foreach ($inbounds as $inbound) {
             $settings = json_decode($inbound['settings'] ?? '{}', true);
             if (isset($settings['clients']) && is_array($settings['clients'])) {
@@ -439,6 +490,9 @@ class ClientService
                     $stmtUpdate = $db->prepare("UPDATE inbounds SET settings = ? WHERE id = ?");
                     $stmtUpdate->execute([json_encode($settings, JSON_UNESCAPED_UNICODE), $inbound['id']]);
                     $removedFromInbounds++;
+                    if (!empty($inbound['tag'])) {
+                        $removedInboundTags[] = $inbound['tag'];
+                    }
                 }
             }
         }
@@ -481,17 +535,18 @@ class ClientService
 
         return [
             "status"                => "success",
-            "message"               => "Client removed successfully",
+            "message"               => "Client removed successfully (no restart)",
             "email"                 => $email,
             "inbound_id"            => $inboundId,
             "removed_from_inbounds" => $removedFromInbounds,
+            "removed_inbound_tags"  => $removedInboundTags,
         ];
     }
+
     public static function getAllClientsStats(string $host): array
     {
         $db = Database::getConnection();
 
-        // 1. Собираем статистику трафика по всем email сразу
         $trafficStmt = $db->query("
             SELECT
                 email,
@@ -508,7 +563,6 @@ class ClientService
             $traffics[$row['email']] = $row;
         }
 
-        // 2. Получаем все инбаунды
         $inboundsStmt = $db->query("
             SELECT id, port, remark, protocol, settings, stream_settings
             FROM inbounds
@@ -568,5 +622,122 @@ class ClientService
         return $result;
     }
 
+    /**
+     * Отправить клиента в память ядра Xray на лету
+     */
+    public static function pushClientToXray(int $inboundId, string $email): bool
+    {
+        try {
+            $db = Database::getConnection();
+            $stmt = $db->prepare("SELECT id, tag, port, protocol, settings, stream_settings FROM inbounds WHERE id = ?");
+            $stmt->execute([$inboundId]);
+            $inbound = $stmt->fetch();
+            if (!$inbound) {
+                return false;
+            }
 
+            $settings = json_decode($inbound['settings'] ?? '{}', true) ?? [];
+            if (empty($settings['clients']) || !is_array($settings['clients'])) {
+                return false;
+            }
+
+            $clientData = null;
+            foreach ($settings['clients'] as $c) {
+                if (($c['email'] ?? '') === $email) {
+                    $clientData = $c;
+                    break;
+                }
+            }
+
+            if (!$clientData) {
+                return false;
+            }
+
+            $res = XrayService::addUser($inbound, $clientData);
+            return $res['success'] ?? false;
+        } catch (\Throwable $e) {
+            error_log("Failed to push client to Xray on the fly: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Убедиться, что клиент активен в памяти Xray (например, после продления)
+     */
+    public static function ensureClientActiveInXray(string $email): void
+    {
+        try {
+            $db = Database::getConnection();
+            $stmt = $db->prepare("
+                SELECT i.id, i.tag, i.port, i.protocol, i.settings, i.stream_settings
+                FROM inbounds i
+                JOIN client_inbounds ci ON ci.inbound_id = i.id
+                JOIN clients c ON c.id = ci.client_id
+                WHERE c.email = ?
+            ");
+            $stmt->execute([$email]);
+            $inbounds = $stmt->fetchAll();
+
+            foreach ($inbounds as $inbound) {
+                $settings = json_decode($inbound['settings'] ?? '{}', true) ?? [];
+                if (!empty($settings['clients'])) {
+                    foreach ($settings['clients'] as $c) {
+                        if (($c['email'] ?? '') === $email && !empty($c['enable'])) {
+                            XrayService::addUser($inbound, $c);
+                        }
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            error_log("Failed to ensure client active in Xray: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Синхронизация всех активных клиентов из базы в память ядра Xray
+     */
+    public static function syncAllActiveClients(): array
+    {
+        $db = Database::getConnection();
+        $inboundsStmt = $db->query("
+            SELECT id, tag, port, protocol, settings, enable
+            FROM inbounds
+            WHERE enable = 1 AND settings IS NOT NULL
+        ");
+        $inbounds = $inboundsStmt->fetchAll();
+
+        $nowMs = (int)(microtime(true) * 1000);
+        $synced = 0;
+        $errors = 0;
+
+        foreach ($inbounds as $inbound) {
+            $settings = json_decode($inbound['settings'] ?? '{}', true) ?? [];
+            if (empty($settings['clients'])) {
+                continue;
+            }
+
+            foreach ($settings['clients'] as $c) {
+                $email = $c['email'] ?? '';
+                $expiry = (int)($c['expiryTime'] ?? 0);
+                $enable = !empty($c['enable']);
+
+                if ($email === '' || !$enable || ($expiry > 0 && $expiry < $nowMs)) {
+                    continue;
+                }
+
+                $res = XrayService::addUser($inbound, $c);
+                if (!empty($res['success'])) {
+                    $synced++;
+                } else {
+                    $errors++;
+                }
+            }
+        }
+
+        return [
+            'status' => 'success',
+            'synced' => $synced,
+            'errors' => $errors,
+        ];
+    }
 }
