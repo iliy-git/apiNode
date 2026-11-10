@@ -98,7 +98,7 @@ apinode
 
 ---
 
-## 📡 Спецификация API (Endpoints)
+## 📡 API
 
 Все запросы требуют заголовок: `X-API-KEY: <ваш_ключ>`.
 
@@ -118,52 +118,7 @@ apinode
 
 ---
 
-## 💾 Как мастер-панель запрашивает бэкап
-
-### Скачивание файла базы данных (.db):
-```php
-$response = Http::withHeaders(['X-API-KEY' => $apiKey])
-    ->withoutVerifying()
-    ->get("https://{$nodeIp}:11223/backup");
-
-file_put_contents("backup-{$nodeIp}.db", $response->body());
-```
-
-### Запрос бэкапа в формате JSON:
-```php
-$response = Http::withHeaders(['X-API-KEY' => $apiKey])
-    ->withoutVerifying()
-    ->get("https://{$nodeIp}:11223/backup", ['format' => 'json']);
-
-$backupData = $response->json();
-// $backupData['data']['inbounds'], $backupData['data']['clients'], $backupData['data']['settings']
-```
-
----
-
-## 🏗 Архитектура
-
-```text
-[Клиент / Мастер-панель]
-           │
-           │ HTTPS (порт 11223 или кастомный)
-           ▼
-     [vpn_nginx_ssl]  (TLS termination, проверка сертификатов)
-           │
-           │ FastCGI (127.0.0.1:9000)
-           ▼
-    [x-ui-api-mini]   (PHP 8.3 FPM)
-      ├── SQLite DB   (Хранение настроек, клиентов и инбаундов)
-      ├── BackupService (VACUUM INTO снапшоты, JSON экспорт/импорт)
-      └── XrayService (gRPC CLI вызовы: xray api adu / rmu / statsquery)
-           │
-           │ gRPC (127.0.0.1:62789)
-           ▼
-     [Xray-core]      (Сетевой трафик, 0 downtime, счетчики байт)
-```
-
----
 
 <div align="center">
-Made with ❤️ for high-load VPN infrastructures
+    Made with ❤️ for high-load VPN infrastructures
 </div>
