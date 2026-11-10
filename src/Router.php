@@ -17,7 +17,7 @@ class Router
         $host = explode(':', $_SERVER['HTTP_HOST'] ?? '127.0.0.1')[0];
 
         // 1. Healthcheck: GET /ping
-        if ($uri === '/ping' && $method === 'GET') {
+        if ($uri === '/ping' && ($method === 'GET' || $method === 'HEAD')) {
             Response::json([
                 "status"      => "ok",
                 "message"     => "Connection established and authenticated",
@@ -26,7 +26,7 @@ class Router
         }
 
         // 2. Список инбаундов: GET /inbounds
-        if ($uri === '/inbounds' && $method === 'GET') {
+        if ($uri === '/inbounds' && ($method === 'GET' || $method === 'HEAD')) {
             $inbounds = InboundService::getAllInbounds();
             Response::json([
                 "status" => "success",
@@ -36,19 +36,19 @@ class Router
         }
 
         // 3. Список всех клиентов со статистикой: GET /clients или GET /stats
-        if (($uri === '/clients' || $uri === '/stats') && $method === 'GET') {
+        if (($uri === '/clients' || $uri === '/stats') && ($method === 'GET' || $method === 'HEAD')) {
             $clients = ClientService::getAllClientsStats($host);
             Response::json($clients);
         }
 
         // 4. Выгрузка всех конфигов: GET / или корень
-        if (($uri === '' || $uri === '/') && $method === 'GET' && !isset($_GET['email'])) {
+        if (($uri === '' || $uri === '/') && ($method === 'GET' || $method === 'HEAD') && !isset($_GET['email'])) {
             $configs = InboundService::getAllConfigs($host);
             Response::json($configs);
         }
 
         // 5. Статистика по конкретному клиенту: GET /email?email=...
-        if (($uri === '/email' || $uri === '' || $uri === '/') && $method === 'GET' && isset($_GET['email'])) {
+        if (($uri === '/email' || $uri === '' || $uri === '/') && ($method === 'GET' || $method === 'HEAD') && isset($_GET['email'])) {
             $email = trim((string)$_GET['email']);
             if ($email === '') {
                 Response::error("Email is required", 400);
@@ -132,13 +132,13 @@ class Router
         }
 
         // 9. Синхронизация всех клиентов в память Xray: POST|GET /xray/sync
-        if ($uri === '/xray/sync' && ($method === 'POST' || $method === 'GET')) {
+        if ($uri === '/xray/sync' && ($method === 'POST' || ($method === 'GET' || $method === 'HEAD'))) {
             $syncResult = ClientService::syncAllActiveClients();
             Response::json($syncResult);
         }
 
         // 10. Запрос бэкапа: GET /backup (или /backup/download)
-        if (($uri === '/backup' || $uri === '/backup/download') && $method === 'GET') {
+        if (($uri === '/backup' || $uri === '/backup/download') && ($method === 'GET' || $method === 'HEAD')) {
             $format = strtolower(trim((string)($_GET['format'] ?? 'file')));
             if ($format === 'json') {
                 $data = BackupService::exportJsonBackup($host);
